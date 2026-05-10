@@ -158,7 +158,8 @@ export default function discordPresence(pi: ExtensionAPI) {
 	pi.registerCommand("discord-presence", {
 		description: "toggle or refresh Discord Rich Presence for this pi session. Usage: /discord-presence [on|off|status|refresh]",
 		handler: async (args, ctx) => {
-			const action = args.trim().toLowerCase() || "status";
+			const rawAction = args.trim().toLowerCase();
+			const action = rawAction || (enabled ? "off" : "on");
 
 			if (action === "off") {
 				enabled = false;
@@ -182,6 +183,11 @@ export default function discordPresence(pi: ExtensionAPI) {
 			if (action === "refresh") {
 				await flushPresence();
 				ctx.ui.notify("discord rich presence refreshed.", "info");
+				return;
+			}
+
+			if (action !== "status") {
+				ctx.ui.notify("usage: /discord-presence [on|off|status|refresh]", "warning");
 				return;
 			}
 

@@ -24,6 +24,7 @@ Then restart pi or run `/reload`.
 Inside pi:
 
 ```text
+/discord-presence         # toggle on/off
 /discord-presence status
 /discord-presence off
 /discord-presence on
