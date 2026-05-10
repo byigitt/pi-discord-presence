@@ -24,11 +24,17 @@ Then restart pi or run `/reload`.
 Inside pi:
 
 ```text
-/discord-presence         # toggle on/off
+/discord-presence         # toggle on/off globally
 /discord-presence status
 /discord-presence off
 /discord-presence on
 /discord-presence refresh
+```
+
+The on/off state is global across pi projects and sessions. It is stored at:
+
+```text
+~/.pi/agent/discord-presence-state.json
 ```
 
 ## Better Discord display

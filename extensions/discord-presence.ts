@@ -1,10 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import DiscordRPC from "discord-rpc";
+import { existsSync, mkdirSync, readFileSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 const CLIENT_ID = process.env.PI_DISCORD_CLIENT_ID ?? "1378773754103988274";
 const LARGE_IMAGE_KEY = process.env.PI_DISCORD_LARGE_IMAGE_KEY;
 const SMALL_IDLE_IMAGE_KEY = process.env.PI_DISCORD_SMALL_IDLE_IMAGE_KEY;
 const SMALL_WORKING_IMAGE_KEY = process.env.PI_DISCORD_SMALL_WORKING_IMAGE_KEY;
+const GLOBAL_STATE_FILE = join(homedir(), ".pi", "agent", "discord-presence-state.json");
 const RECONNECT_DELAY_MS = 15_000;
 const PRESENCE_UPDATE_DEBOUNCE_MS = 750;
 const DISCORD_TEXT_LIMIT = 128;
@@ -35,13 +39,29 @@ const normalizeProjectName = (cwd: string): string => {
 	return parts.at(-1) ?? "pi session";
 };
 
+const readGlobalEnabled = (): boolean => {
+	try {
+		const raw = readFileSync(GLOBAL_STATE_FILE, "utf8");
+		const parsed = JSON.parse(raw) as { enabled?: unknown };
+		return parsed.enabled !== false;
+	} catch {
+		return true;
+	}
+};
+
+const writeGlobalEnabled = (enabled: boolean) => {
+	mkdirSync(dirname(GLOBAL_STATE_FILE), { recursive: true });
+	writeFileSync(GLOBAL_STATE_FILE, `${JSON.stringify({ enabled }, null, 2)}\n`);
+};
+
 export default function discordPresence(pi: ExtensionAPI) {
 	let rpc: DiscordRpcClient | undefined;
 	let connected = false;
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let updateTimer: NodeJS.Timeout | undefined;
+	let stateWatcher: FSWatcher | undefined;
 	let shuttingDown = false;
-	let enabled = true;
+	let enabled = readGlobalEnabled();
 
 	let presence: PresenceState = {
 		status: "offline",
@@ -155,28 +175,53 @@ export default function discordPresence(pi: ExtensionAPI) {
 		rpc = undefined;
 	};
 
+	const applyGlobalEnabled = async (nextEnabled: boolean, cwd: string) => {
+		if (enabled === nextEnabled) return;
+		enabled = nextEnabled;
+
+		if (!enabled) {
+			await clearDiscordPresence();
+			return;
+		}
+
+		updatePresence({
+			status: "idle",
+			details: `pi · ${normalizeProjectName(cwd)}`,
+			state: "idle",
+			toolName: undefined,
+			startedAt: Date.now(),
+		});
+		await connect();
+	};
+
+	const watchGlobalState = (cwd: string) => {
+		if (stateWatcher) return;
+
+		mkdirSync(dirname(GLOBAL_STATE_FILE), { recursive: true });
+		if (!existsSync(GLOBAL_STATE_FILE)) writeGlobalEnabled(enabled);
+		stateWatcher = watch(GLOBAL_STATE_FILE, { persistent: false }, () => {
+			void applyGlobalEnabled(readGlobalEnabled(), cwd);
+		});
+	};
+
 	pi.registerCommand("discord-presence", {
-		description: "toggle or refresh Discord Rich Presence for this pi session. Usage: /discord-presence [on|off|status|refresh]",
+		description: "toggle or refresh Discord Rich Presence for all pi sessions. Usage: /discord-presence [on|off|status|refresh]",
 		handler: async (args, ctx) => {
+			enabled = readGlobalEnabled();
 			const rawAction = args.trim().toLowerCase();
 			const action = rawAction || (enabled ? "off" : "on");
 
 			if (action === "off") {
-				enabled = false;
-				await clearDiscordPresence();
-				ctx.ui.notify("discord rich presence disabled.", "info");
+				writeGlobalEnabled(false);
+				await applyGlobalEnabled(false, ctx.cwd);
+				ctx.ui.notify("discord rich presence disabled globally.", "info");
 				return;
 			}
 
 			if (action === "on") {
-				enabled = true;
-				await connect();
-				updatePresence({
-					status: "idle",
-					details: `pi · ${normalizeProjectName(ctx.cwd)}`,
-					state: "idle",
-				});
-				ctx.ui.notify("discord rich presence enabled.", "info");
+				writeGlobalEnabled(true);
+				await applyGlobalEnabled(true, ctx.cwd);
+				ctx.ui.notify("discord rich presence enabled globally.", "info");
 				return;
 			}
 
@@ -192,7 +237,7 @@ export default function discordPresence(pi: ExtensionAPI) {
 			}
 
 			ctx.ui.notify(
-				`discord presence: ${enabled ? "enabled" : "disabled"}, ${connected ? "connected" : "not connected"}`,
+				`discord presence: ${enabled ? "enabled globally" : "disabled globally"}, ${connected ? "connected" : "not connected"}`,
 				connected ? "info" : "warning",
 			);
 		},
@@ -200,13 +245,15 @@ export default function discordPresence(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		shuttingDown = false;
+		watchGlobalState(ctx.cwd);
+		enabled = readGlobalEnabled();
 		updatePresence({
 			status: "idle",
 			details: `pi · ${normalizeProjectName(ctx.cwd)}`,
 			state: "idle",
 			startedAt: Date.now(),
 		});
-		void connect();
+		if (enabled) void connect();
 	});
 
 	pi.on("model_select", async (event) => {
@@ -249,6 +296,8 @@ export default function discordPresence(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
+		stateWatcher?.close();
+		stateWatcher = undefined;
 		await clearDiscordPresence();
 	});
 }
